@@ -1,0 +1,592 @@
+```{r, echo = FALSE}
+library(tidyverse)  
+library(MASS)
+library(car)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+```
+
+```{r, echo = FALSE}
+raw_data <- read.csv("AirBnB.csv", header = TRUE)
+```
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, results = 'hide'}
+# 1) Area for Amsterdam, North Holland, Netherlands
+# Keep ONLY the variables needed to build the 9 predictors
+#    (keep 'room_type' now and make dummies in step 3)
+base <- raw_data %>%
+  filter(!is.na(city)) %>%
+  filter(!is.na(state)) %>%
+  filter(!is.na(country)) %>%
+  
+  mutate(
+    city_clean = case_when(
+      city == "Amsterdam" ~ "Amsterdam",
+   
+    ),
+    
+    state_clean = case_when(
+      state %in% c("North Holland", "Noord-Holland", "NH") ~ "North Holland",
+     
+    ),
+    
+    country_clean = case_when(
+      country == "Netherlands" ~ "Netherlands",
+    
+    )
+  )  %>%
+  
+  filter(!is.na(city_clean)) %>%
+  filter(!is.na(state_clean)) %>%
+  filter(!is.na(country_clean)) %>%
+  
+    dplyr::select(price, accommodates, room_type, number_of_reviews,
+         review_scores_rating, host_response_rate, host_response_time)
+
+# 2) drop rows where any kept character field is just spaces, then drop NAs
+base_clean <- base %>%
+  mutate(across(where(is.character),
+                ~ na_if(str_trim(str_to_lower(.)), ""))) %>%  
+  mutate(across(where(is.character),
+                ~ na_if(., "na"))) %>% 
+  drop_na() 
+
+# 3) minimal numeric conversions
+#    - strip "$" and "," from price, then make numeric
+base_num <- base_clean %>%
+  mutate(
+    price                = parse_number(price),
+    accommodates         = as.numeric(accommodates),
+    number_of_reviews    = as.numeric(number_of_reviews),
+    review_scores_rating = as.numeric(review_scores_rating),
+    host_response_rate   = as.numeric(host_response_rate),
+  ) %>% drop_na(price, accommodates, number_of_reviews,
+           review_scores_rating, host_response_rate, room_type)
+
+# 4) Build dummy variables for room_type:
+#    Private room and Shared room (Entire home/apt is the baseline with both 0)
+base_new_var <- base_num %>%
+ mutate(
+    private_room = if_else(room_type == "private room", 1, 0, missing = NA_real_),
+    shared_room  = if_else(room_type == "shared room",  1, 0, missing = NA_real_),
+
+    # --- NEW: host response time dummies (baseline: "within a day") ---
+    # Normalize to lower-case for robust matching
+    host_response_time_lc = stringr::str_to_lower(host_response_time),
+    hr_within_hour        = if_else(host_response_time_lc == "within an hour",        1, 0, missing = NA_real_),
+    hr_within_few_hours   = if_else(host_response_time_lc == "within a few hours",    1, 0, missing = NA_real_),
+    hr_few_days_or_more   = if_else(host_response_time_lc == "a few days or more",    1, 0, missing = NA_real_)
+    # baseline (not included): "within a day"  -> all three dummies = 0
+  )
+
+# 5) Create the required interaction predictors
+#    X1:X2, X1:X3, and X4:X5
+clean_airbnb_data <- base_new_var %>%
+  mutate(
+    Price = price,
+    Accommodates  = accommodates,
+    Private_Room = private_room,       # categorical dummy
+    Shared_Room = shared_room,        # categorical dummy
+    Number_of_Reviews = number_of_reviews,
+    Review_Scores_Rating  = review_scores_rating,
+    Host_Response_Rate  = host_response_rate,
+    `Accommodates:Private_Room` = Accommodates * Private_Room,
+    `Accommodates:Shared_Room` = Accommodates * Shared_Room,
+    `Number_of_Reviews:Review_Scores_Rating` = Number_of_Reviews * Review_Scores_Rating,
+  ) %>%
+
+# 6) Keep ONLY the nine predictors need for modeling
+   dplyr::select(Price, Accommodates, Private_Room, Shared_Room, `Accommodates:Private_Room`, `Accommodates:Shared_Room`, Number_of_Reviews, Review_Scores_Rating, `Number_of_Reviews:Review_Scores_Rating`, Host_Response_Rate, hr_within_hour, hr_within_few_hours, hr_few_days_or_more) %>%
+  drop_na()
+
+# 7) Display the first few rows of the dataset
+head(clean_airbnb_data)
+
+# 8) Show the structure of the dataset (variable types and first few values)
+str(clean_airbnb_data)
+nrow(clean_airbnb_data)
+sum(complete.cases(clean_airbnb_data))
+table(base_num$room_type, useNA = "ifany")
+table(base_num$host_response_time, useNA = "ifany")
+```
+
+```{r, echo = FALSE}
+# Transformation(part 1 y response is violated)
+clean_airbnb_data <- clean_airbnb_data %>% 
+  dplyr::mutate(
+    ln_price         = log(Price),                    
+    ln_num_reviews   = log(Number_of_Reviews ),     
+    review_score_sq  = Review_Scores_Rating^2,
+  host_response_sq = Host_Response_Rate^2 
+  )
+Tran_model <- lm(ln_price ~ Accommodates + Private_Room + Shared_Room + `Accommodates:Private_Room` + `Accommodates:Shared_Room` + ln_num_reviews  +     review_score_sq + ln_num_reviews: review_score_sq +  host_response_sq  + hr_within_hour + hr_within_few_hours + hr_few_days_or_more, data = clean_airbnb_data )
+
+
+```
+
+```{r, echo = FALSE}
+stepAIC(Tran_model, direction = "both", k=2)
+```
+
+```{r, echo = FALSE}
+model_auto <-lm(formula = ln_price ~ Accommodates + Private_Room + Shared_Room + 
+    `Accommodates:Private_Room` + `Accommodates:Shared_Room` + 
+    ln_num_reviews + review_score_sq + hr_within_hour + hr_within_few_hours + 
+    hr_few_days_or_more + ln_num_reviews:review_score_sq, data = clean_airbnb_data)
+
+```
+
+```{r, echo = FALSE}
+
+anova_res <- anova(model_auto, Tran_model) ## --- Model comparison: transformed full vs auto model ---
+
+
+f_tab <- tibble::tibble(
+  Comparison = "Full vs Auto(reduced) model",
+  Extra_term = "ln_host_response",       
+  df_num     = anova_res$Df[2],
+  df_den     = anova_res$Res.Df[2],
+  F          = anova_res$F[2],
+  p_value    = anova_res$`Pr(>F)`[2]
+)
+
+f_tab
+
+f_tab %>%
+  mutate(
+    F       = round(F, 3),
+    p_value = round(p_value, 3)
+  ) %>%
+  kable(
+    caption = "Nested F-test comparing transformed full model and Auto model",
+    align   = c("l", "l", "c", "c", "c", "c")
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    position   = "center",
+    bootstrap_options = c("condensed", "bordered")
+  )
+```
+
+```{r, echo = FALSE}
+#check multicollinearity
+
+ggplot(clean_airbnb_data,
+       aes(x = ln_num_reviews,
+           y = ln_num_reviews *  review_score_sq )) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.7) +
+  labs(
+    x = "ln_num_reviews",
+    y = "ln_num_reviews ×  review_score_sq ",
+    title = "Relationship between ln_num_reviews and ln_num_reviews × review_score_sq "
+  ) +
+  theme_classic()
+# delete the interatcion
+vif_auto<-vif(model_auto)
+vif_tab <- data.frame(
+  Predictor = names(vif_auto),
+  VIF       = as.numeric(vif_auto)
+)
+
+vif_tab %>%
+  mutate(VIF = round(VIF, 2)) %>%   
+  arrange(desc(VIF)) %>%          
+  kable(
+    caption = "Impact of multicollinearity on coefficient variance in the model_auto",
+    align   = c("l", "c")
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    position   = "center",
+   bootstrap_options = c("condensed", "bordered")
+  )
+
+# delete the interatcion
+```
+
+
+
+
+```{r}
+model_final <- lm(formula = ln_price ~ Accommodates + Private_Room + Shared_Room + 
+    `Accommodates:Private_Room` + `Accommodates:Shared_Room` + 
+    ln_num_reviews +  review_score_sq  + hr_within_hour + hr_within_few_hours + 
+    hr_few_days_or_more , data = clean_airbnb_data)
+
+vif_final<-vif(model_final)
+vif_tab <- data.frame(
+  Predictor = names(vif_final),
+  VIF       = as.numeric(vif_final)
+)
+
+vif_tab %>%
+  mutate(VIF = round(VIF, 2)) %>%   
+  arrange(desc(VIF)) %>%          
+  kable(
+    caption = "Impact of multicollinearity on coefficient variance in the model_final",
+    align   = c("l", "c")
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    position   = "center",
+    bootstrap_options = c("condensed", "bordered")
+  )
+
+```
+
+
+```{r}
+n_tran   <- nrow(model.frame(Tran_model))
+n_final  <- nrow(model.frame(model_final))
+n_tran 
+n_final 
+p_tran   <- length(coef(Tran_model)) -1
+p_final  <- length(coef(model_final)) -1
+p_tran 
+p_final
+## Adjusted R^2
+adjR2_tran  <- summary(Tran_model)$adj.r.squared
+adjR2_final <- summary(model_final)$adj.r.squared
+
+## AIC
+AIC_tran  <- extractAIC(Tran_model,  k = 2)[2]
+AIC_final <- extractAIC(model_final, k = 2)[2]
+
+## AICc
+AICc_tran  <- AIC_tran  + (2 * (p_tran+2)  * (p_tran  + 3)) / (n_tran  - p_tran  - 1)
+AICc_final <- AIC_final + (2 * (p_final+2) * (p_final + 3)) / (n_final - p_final - 1)
+
+## BIC（k = log(n)）
+BIC_tran  <- extractAIC(Tran_model,  k = log(n_tran ))[2]
+BIC_final <- extractAIC(model_final, k = log(n_final))[2]
+
+lik_tab <- data.frame(
+  Model   = c("Tran_model", "model_final"),
+  Adj_R2  = c(adjR2_tran,   adjR2_final),
+  AIC     = c(AIC_tran,     AIC_final),
+  AICc    = c(AICc_tran,    AICc_final),
+  BIC     = c(BIC_tran,     BIC_final)
+)
+
+lik_tab
+lik_tab %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3))) %>% 
+  kable(caption = "Comparison of Tran_model and model_final") %>%
+  kable_styling(
+    full_width = FALSE,
+    position   = "center",
+    bootstrap_options = c("striped", "condensed", "bordered") 
+  )
+```
+
+
+```{r all_plots, fig.show="hold", out.width="90%", fig.height=5, fig.width=8, fig.align="center", echo=FALSE}
+## ========== Diagnostics for Final Model ==========
+## ================= Check assumptions (two conditions) =================
+e_hat <- resid(model_final)
+y_hat <- fitted(model_final)
+
+
+## =================Pairs plot (scatterplot matrix) for predictors =================
+names(model.frame(model_final))
+pairs(
+  model.frame(model_final)[ , c(
+    "Accommodates",
+    "Private_Room",
+    "Shared_Room",
+    "ln_num_reviews",
+    "review_score_sq",
+    "hr_within_hour" ,
+    "hr_within_few_hours",
+     "hr_few_days_or_more"   
+  )],
+  main = "Pairs Plot of Predictors",
+  pch  = 19,
+  cex  = 0.5,
+  col  = "grey40"
+)
+## ---------- Fitted vs Actual ln-Price ----------
+par(mfrow = c(1, 2), mar = c(4, 4, 2, 1))
+
+plot(
+  x = y_hat,
+  y = model.frame(model_final)$ln_price,   
+  pch  = 19,
+  cex  = 0.7,
+  main = "Fitted Values vs Actual ln_Price",
+  xlab = "Fitted (Predicted) ln_Price",
+  ylab = "Actual ln_Price"
+)
+abline(a = 0, b = 1, col = "blue", lwd = 2, lty = 2)
+#Normal Q-Q plot
+qqnorm(e_hat,
+       main = "Normal Q-Q")
+qqline(e_hat)
+
+```
+```{r all_plots2, fig.show="hold", out.width="70%", fig.height=10, fig.width=13, fig.align="center", echo=FALSE}
+
+## ================= Check assumptions  =================
+
+## ================= Figure: Scatterplots of Residuals vs Predictors =================
+par(mfrow = c(2,2))
+ #Residuals vs Fitted 
+plot(e_hat ~ y_hat,
+     xlab = "Fitted ln_price",
+     ylab = "Residuals",
+     main = "Residuals vs Fitted")
+abline(h = 0, lty = 2)
+## ---- Accommodates vs residuals ----
+
+plot(
+  x = model.frame(model_final)$Accommodates,
+  y = e_hat,
+  main = "Residuals vs Accommodates",
+  xlab = "Accommodates",
+  ylab = "Residuals",
+  pch  = 19,
+  cex  = 0.7
+)
+abline(h = 0, lty = 2)
+
+
+## ----"ln_num_reviews" vs residuals ----
+plot(
+  x = model.frame(model_final)$ln_num_reviews, 
+  y = e_hat,
+  main = "Residuals vs ln_num_reviews",
+  xlab = "ln_num_reviews",
+  ylab = "Residuals",
+  pch  = 19,
+  cex  = 0.7
+)
+abline(h = 0, lty = 2)
+## ----  review_score_sq  vs residuals ----
+plot(
+  x = model.frame(model_final)$ review_score_sq ,
+  y = e_hat,
+  main = "Residuals vs  review_score_sq ",
+  xlab = " review_score_sq ",
+  ylab = "Residuals",
+  pch  = 19,
+  cex  = 0.7
+)
+abline(h = 0, lty = 2)
+
+```
+
+
+
+
+
+```{r leverage_hist, fig.height=4, fig.width=6}
+
+# checking problematic observations 
+# problematic observations
+p = length(coef(model_final))-1
+n = nrow(model.frame(model_final))
+n
+p 
+# leverage
+cutoff1 <- 2*((p+1)/n)
+cutoff1
+hii <- hatvalues(model_final)
+high_lev_index <- which(hii > cutoff1)
+high_lev_index
+plot(
+  x = 1:length(hii),
+  y = hii,
+  xlab = "Observation index",
+  ylab = "Leverage (h_ii)",
+  main = "Leverage values for the final model"
+)
+abline(h = cutoff1, col = "red", lty = 2)     # cutoff1 = 2*(p+1)/n
+points(high_lev_index, hii[high_lev_index],
+       col = "red", pch = 19)
+
+```
+
+```{r rstd_plot, fig.height=4, fig.width=6}
+# outlier
+ri <- rstandard(model_final) 
+# n >> 50
+outliers_index <- which (ri > 4 | ri < -4)
+outliers_index
+plot(
+  x = 1:length(ri),
+  y = ri,
+  xlab = "Observation index",
+  ylab = "Standardized residual",
+  main = "Outliers for the final model"
+)
+abline(h = 0,          col = "grey40")
+abline(h = c(-4, 4),   col = "red", lty = 2)   
+points(outliers_index, ri[outliers_index],
+       col = "red", pch = 19)
+```
+
+```{r cooks_plot_final, echo=FALSE}
+ # cook's distance
+di <- cooks.distance(model_final) 
+cutoff2 <- qf(0.5, p+1, n-p-1)
+cutoff2
+cook_influential <- which(di>cutoff2)
+cook_influential
+plot(
+  x = 1:length(di),
+  y = di,
+  xlab = "Observation index",
+  ylab = "Cook's distance",
+  main = "Cook's distance for the final model"
+)
+abline(h = cutoff2, col = "red", lty = 2)   
+points(cook_influential, di[cook_influential],
+       col = "red", pch = 19)
+
+```
+
+```{r DFFITS, fig.height=4, fig.width=6,echo=FALSE, message = FALSE}
+ # DFFITS
+cutoff3 <- 2*sqrt((p+1)/n)
+cutoff3
+DFFITS <- dffits(model_final)
+DFFITS_influential <-which(dffits(model_final) > cutoff3 | dffits(model_final) < -1*cutoff3)
+DFFITS_influential
+plot(
+  x = 1:length(DFFITS),
+  y = DFFITS,
+  xlab = "Observation index",
+  ylab = "DFFITS",
+  main = "DFFITS for the final model"
+)
+abline(h = c(-cutoff3, cutoff3), col = "red", lty = 2)  # cutoff3 = 2*sqrt((p+1)/n)
+points(DFFITS_influential, DFFITS[DFFITS_influential],
+       col = "red", pch = 19)
+```
+
+```{r DFBETAS, fig.height=4, fig.width=6,echo=FALSE}
+#DFBETAS
+DFBETAS <- dfbetas(model_final) 
+cutoff4 <- 2/sqrt(n)
+cutoff4
+DFBETAS_influential <- abs(dfbetas(model_final))>cutoff4
+DFBETAS_influential
+max_dfbetas <- apply(DFBETAS, 1, function(x) max(abs(x)))
+
+plot(
+  x = 1:length(max_dfbetas),
+  y = max_dfbetas,
+  xlab = "Observation index",
+  ylab = "max |DFBETA|",
+  main = "Maximum |DFBETA| across coefficients"
+)
+abline(h = cutoff4, col = "red", lty = 2)  # cutoff4 = 2/sqrt(n)
+points(which(max_dfbetas > cutoff4),
+       max_dfbetas[max_dfbetas > cutoff4],
+       col = "red", pch = 19)
+```
+ 
+
+```{r prob_plots, fig.height=6, fig.width=10, echo=FALSE, message=FALSE, warning=FALSE, fig.show="hold"}
+par(mfrow = c(2, 3), mar = c(4, 4, 2, 1))   
+p = length(coef(model_final)) - 1
+n = nrow(model.frame(model_final))
+cutoff1 <- 2 * ((p + 1) / n)
+hii <- hatvalues(model_final)
+high_lev_index <- which(hii > cutoff1)
+
+plot(
+  x = 1:length(hii),
+  y = hii,
+  xlab = "Observation index",
+  ylab = "Leverage (h_ii)",
+  main = "Leverage values for the final model"
+)
+abline(h = cutoff1, col = "red", lty = 2)
+points(high_lev_index, hii[high_lev_index], col = "red", pch = 19)
+
+# 2) standardized residuals
+ri <- rstandard(model_final)
+outliers_index <- which(ri > 4 | ri < -4)
+
+plot(
+  x = 1:length(ri),
+  y = ri,
+  xlab = "Observation index",
+  ylab = "Standardized residual",
+  main = "Outliers for the final model"
+)
+abline(h = 0, col = "grey40")
+abline(h = c(-4, 4), col = "red", lty = 2)
+points(outliers_index, ri[outliers_index], col = "red", pch = 19)
+
+# 3) Cook's distance
+di <- cooks.distance(model_final)
+cutoff2 <- qf(0.5, p + 1, n - p - 1)
+cook_influential <- which(di > cutoff2)
+
+plot(
+  x = 1:length(di),
+  y = di,
+  xlab = "Observation index",
+  ylab = "Cook's distance",
+  main = "Cook's distance for the final model"
+)
+abline(h = cutoff2, col = "red", lty = 2)
+points(cook_influential, di[cook_influential], col = "red", pch = 19)
+
+# 4) DFFITS
+cutoff3 <- 2 * sqrt((p + 1) / n)
+DFFITS <- dffits(model_final)
+DFFITS_influential <- which(DFFITS > cutoff3 | DFFITS < -cutoff3)
+
+plot(
+  x = 1:length(DFFITS),
+  y = DFFITS,
+  xlab = "Observation index",
+  ylab = "DFFITS",
+  main = "DFFITS for the final model"
+)
+abline(h = c(-cutoff3, cutoff3), col = "red", lty = 2)
+points(DFFITS_influential, DFFITS[DFFITS_influential], col = "red", pch = 19)
+
+# 5) max |DFBETAS|
+DFBETAS <- dfbetas(model_final)
+cutoff4 <- 2 / sqrt(n)
+max_dfbetas <- apply(DFBETAS, 1, function(x) max(abs(x)))
+
+plot(
+  x = 1:length(max_dfbetas),
+  y = max_dfbetas,
+  xlab = "Observation index",
+  ylab = "max |DFBETA|",
+  main = "Maximum |DFBETA| across coefficients"
+)
+abline(h = cutoff4, col = "red", lty = 2)
+points(which(max_dfbetas > cutoff4), max_dfbetas[max_dfbetas > cutoff4],
+       col = "red", pch = 19)
+
+```
+
+
+```{r coef_table_simple, message=FALSE,echo=FALSE}
+coef_mat <- summary(model_final)$coefficients
+coef_tab <- as.data.frame(coef_mat)
+colnames(coef_tab) <- c("Estimate", "Std.Error", "t value", "p value")
+coef_tab$Significant <- ifelse(coef_tab$`p value` < 0.05,
+                               "Significant", "Not significant")
+
+coef_tab %>%
+  knitr::kable(digits = 3) %>%
+  kable_styling(full_width = FALSE,
+                bootstrap_options = "bordered")
+
+```
+
+
+
+
+

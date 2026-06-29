@@ -1,0 +1,378 @@
+---
+title: "**Linear Regression Analysis: Aligning Host Pricing Decisions with Consumer Preferences in Amsterdam, North Holland, Netherlands**"
+subtitle: "STA302 Project"
+author: "Lu Chen 1009391864, Karen Shu 1008762251, Jiajia Lu  1009343925"
+output:
+  pdf_document:
+    latex_engine: xelatex
+fontsize: 12pt
+mainfont: "Times New Roman"
+header-includes:
+  - \usepackage{setspace}
+  - \doublespacing
+---
+**\underline{Contributions}**
+
+Lu Chen: I did the introduction and data description for this proposal. And also transferred the word document to the R markdown file.    
+Karen Shu: I built the MLR model, drew residual plots in the R markdown file and analyzed preliminary data for this proposal.   
+Jiajia Lu: I wrote the Ethics Discussion and Plan sections for this proposal, and helped organize the flowchart for the project timeline.  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(readr)
+library(stringr)
+library(tidyr)
+library(psych)
+library(kableExtra)
+library(tibble)
+```
+
+
+```{r load_data, echo = FALSE}
+# Load the dataset
+raw_data <- read.csv("AirBnB.csv")
+
+```
+
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, results = 'hide'}
+# 1) Area for Amsterdam, North Holland, Netherlands
+# Keep ONLY the variables needed to build the 9 predictors
+#    (keep 'room_type' now and make dummies in step 3)
+base <- raw_data %>%
+  filter(!is.na(city)) %>%
+  filter(!is.na(state)) %>%
+  filter(!is.na(country)) %>%
+  
+  mutate(
+    city_clean = case_when(
+      city == "Amsterdam" ~ "Amsterdam",
+   
+    ),
+    
+    state_clean = case_when(
+      state %in% c("North Holland", "Noord-Holland", "NH") ~ "North Holland",
+     
+    ),
+    
+    country_clean = case_when(
+      country == "Netherlands" ~ "Netherlands",
+    
+    )
+  )  %>%
+  
+  filter(!is.na(city_clean)) %>%
+  filter(!is.na(state_clean)) %>%
+  filter(!is.na(country_clean)) %>%
+  
+  select(price, accommodates, room_type, number_of_reviews,
+         review_scores_rating, host_response_rate, host_response_time)
+
+# 2) drop rows where any kept character field is just spaces, then drop NAs
+base_clean <- base %>%
+  mutate(across(where(is.character),
+                ~ na_if(str_trim(str_to_lower(.)), ""))) %>%  
+  mutate(across(where(is.character),
+                ~ na_if(., "na"))) %>% 
+  drop_na() 
+
+# 3) minimal numeric conversions
+#    - strip "$" and "," from price, then make numeric
+base_num <- base_clean %>%
+  mutate(
+    price                = parse_number(price),
+    accommodates         = as.numeric(accommodates),
+    number_of_reviews    = as.numeric(number_of_reviews),
+    review_scores_rating = as.numeric(review_scores_rating),
+    host_response_rate   = as.numeric(host_response_rate),
+  ) %>% drop_na(price, accommodates, number_of_reviews,
+           review_scores_rating, host_response_rate, room_type)
+
+# 4) Build dummy variables for room_type:
+#    Private room and Shared room (Entire home/apt is the baseline with both 0)
+base_new_var <- base_num %>%
+ mutate(
+    private_room = if_else(room_type == "private room", 1, 0, missing = NA_real_),
+    shared_room  = if_else(room_type == "shared room",  1, 0, missing = NA_real_),
+
+    # --- NEW: host response time dummies (baseline: "within a day") ---
+    # Normalize to lower-case for robust matching
+    host_response_time_lc = stringr::str_to_lower(host_response_time),
+    hr_within_hour        = if_else(host_response_time_lc == "within an hour",        1, 0, missing = NA_real_),
+    hr_within_few_hours   = if_else(host_response_time_lc == "within a few hours",    1, 0, missing = NA_real_),
+    hr_few_days_or_more   = if_else(host_response_time_lc == "a few days or more",    1, 0, missing = NA_real_)
+    # baseline (not included): "within a day"  -> all three dummies = 0
+  )
+
+# 5) Create the required interaction predictors
+#    X1:X2, X1:X3, and X4:X5
+clean_airbnb_data <- base_new_var %>%
+  mutate(
+    Price = price,
+    Accommodates  = accommodates,
+    Private_Room = private_room,       # categorical dummy
+    Shared_Room = shared_room,        # categorical dummy
+    Number_of_Reviews = number_of_reviews,
+    Review_Scores_Rating  = review_scores_rating,
+    Host_Response_Rate  = host_response_rate,
+    `Accommodates:Private_Room` = Accommodates * Private_Room,
+    `Accommodates:Shared_Room` = Accommodates * Shared_Room,
+    `Number_of_Reviews:Review_Scores_Rating` = Number_of_Reviews * Review_Scores_Rating,
+  ) %>%
+
+# 6) Keep ONLY the nine predictors need for modeling
+  select(Price, Accommodates, Private_Room, Shared_Room, `Accommodates:Private_Room`, `Accommodates:Shared_Room`, Number_of_Reviews, Review_Scores_Rating, `Number_of_Reviews:Review_Scores_Rating`, Host_Response_Rate, hr_within_hour, hr_within_few_hours, hr_few_days_or_more) %>%
+  drop_na()
+
+# 7) Display the first few rows of the dataset
+head(clean_airbnb_data)
+
+# 8) Show the structure of the dataset (variable types and first few values)
+str(clean_airbnb_data)
+nrow(clean_airbnb_data)
+sum(complete.cases(clean_airbnb_data))
+table(base_num$room_type, useNA = "ifany")
+table(base_num$host_response_time, useNA = "ifany")
+```
+**\underline{Introduction}**
+
+Airbnb’s low cost and variety attract users, and price often signals quality (Wang & Jeong, 2018). However, it remains unclear whether the listing prices set by Airbnb hosts (Response variable) truly reflect the factors (predictors) that consumers may consider important when choosing accommodations, such as room type, guest reviews, and host responsiveness. Therefore, this proposal examines whether Airbnb hosts’ pricing decisions align with consumer preferences and whether Airbnb listings are reasonably priced for consumers. Specifically, addressing the research question of “to what extent do Airbnb hosts’ pricing decisions reflect consumer preferences, as represented by host attributes, customer review metrics, and different property features, in Amsterdam, North Holland, Netherlands?”  
+A multiple linear regression is used to answer this question since it quantifies the linear relationship between price and consumer preferences while maintaining high interpretability. By estimating the direction and magnitude of coefficients, consumers identify whether host pricing decisions are consistent with consumer preferences. *P-values* also indicate whether these preferences have a significant impact on price. Furthermore, confidence intervals are used to assess the reliability of each factor’s effect. If this interval includes zero, it indicates inconsistency with consumer preferences. Moreover, predictions can help identify price differences across different room types while controlling for host responsiveness and customer reviews.  
+Three research papers have examined the determinants of Airbnb listing prices, emphasizing the roles of host–guest relationships, review metrics, and room type. Chang and Li (2021) find that hosts’ friendliness and responsiveness enhance guest satisfaction and willingness to pay. Teubner et al. (2017) show that higher review scores and more reviews act as trust signals, leading to higher prices. Together with Wang and Jeong (2018), they also found that entire homes are typically priced higher than private rooms, which are priced higher than shared rooms. Wang and Jeong (2018) further reveal a positive relationship between a property’s accommodation capacity and its price. These findings justify the chosen predictors and support applying multiple linear regression to explore their effects.  
+Both hosts and guests of Airbnb gain from this model. Customers can judge if prices meet expectations and spot overpriced listings by using the model's prediction. By identifying the characteristics that have the most significant impact on price, the model helps hosts modify their pricing strategies. While hosts in Amsterdam significantly consider the private room, and *accommodates* when listing price, they seem to pay little attention to customer reviews, entire home, and shared room, host–guest relationships suggesting that their pricing decisions only partly match what consumers value.  
+
+**\underline{Data description}**
+
+Dr. Philip E. Cannata, an Oracle Principle Software Engineer, uploaded the Airbnb dataset to *data.world* (University of Texas at Austin, n.d.). The dataset, sourced from *Inside Airbnb* (n.d.), was compiled from publicly available Airbnb listings and curated for educational use (Cannata, 2017). By combining related variables for analysis, the cleaned dataset, which focuses on listings in North Holland, Netherlands, keeps only pertinent columns.  
+
+```{r, echo = FALSE}
+# Summary statistics for the response (Y="Price")
+response<-summary(clean_airbnb_data$Price)
+response_summ <-data.frame(Statistic = names(response), Value = as.numeric(response))
+response_table <- knitr::kable(response_summ,
+  caption = "Statistical Summary of the Listing Prices (Response) in Amsterdam, North Holland, Netherlands"
+)
+
+response_table
+
+```
+Listing price is a suitable dependent variable for linear regression as it is ordered, continuous and quantitative. As shown in *Table 1*, prices are concentrated around the interquartile range (82–124.7) with a median of 105, indicating an approximately normal distribution. Although a host may manage multiple listings, each property has a unique ID, ensuring that observations are independent (Cannata, 2017).  
+```{r, echo = FALSE}
+# Summary statistics for all 9 predictors in clean_ml
+
+num_vars <- clean_airbnb_data %>%
+  select(where(is.numeric)) %>%
+  select(- Price)
+predictor_summary <- describe(num_vars) %>%
+  select(mean, sd, median, range, skew) %>%
+  rownames_to_column("Variable") %>%
+  mutate(Variable = recode(Variable,
+                           "Number_of_Reviews:Review_Scores_Rating" = "# Reviews:Review_Scores_Rating"))
+
+predictor_table <- knitr::kable(
+  predictor_summary,
+  caption = "Summary Statistics for Consumer Preferences (Predictors)",
+  col.names = c("Variable", "Mean", "SD", "Median", "Range", "Skew"),
+  digits = 3
+)
+
+predictor_table
+
+
+```
+For this proposal, data cleaning yielded 5,599 valid listings in Amsterdam, North Holland, Netherlands, after removing missing and invalid values. In *Table 2*, skew shows that most predictors have a few large outliers due to right-skewed tails, particularly in shared room and response times measured in days. This suggests that most listings are not shared rooms, as they generate lower profits, consistent with Wang and Jeong (2018). Most hosts respond promptly. The large variance and range in customer review metrics suggest substantial differences in guest satisfaction across listings, with some listings attracting extremely high or low reviews.  
+```{r, echo = FALSE, fig.width = 12, fig.height = 12}
+par(mfrow = c(2, 1))
+# Figure 1: Interaction between Accommodates and Private Room
+plot(clean_airbnb_data$Price ~ clean_airbnb_data$Accommodates,
+     xlab = "Accommodates",
+     ylab = "Price",
+     main = "Figure 1. Interaction between Accommodates and Private Room",
+     type = "n") 
+
+points(clean_airbnb_data$Price[clean_airbnb_data$Private_Room == 1] ~
+       clean_airbnb_data$Accommodates[clean_airbnb_data$Private_Room == 1],
+       col = "blue",pch = 16)
+
+points(clean_airbnb_data$Price[clean_airbnb_data$Private_Room == 0] ~
+       clean_airbnb_data$Accommodates[clean_airbnb_data$Private_Room == 0],
+       col = "black",pch = 16)
+
+lines(lowess(clean_airbnb_data$Price[clean_airbnb_data$Private_Room == 1] ~
+             clean_airbnb_data$Accommodates[clean_airbnb_data$Private_Room == 1]),
+      col = "blue",pch = 16)
+
+lines(lowess(clean_airbnb_data$Price[clean_airbnb_data$Private_Room == 0] ~
+             clean_airbnb_data$Accommodates[clean_airbnb_data$Private_Room == 0]),
+      col = "black",pch = 16)
+
+legend("topleft", legend = c("Private Room", "Other Room Types"),
+       col = c("blue", "black"), lty = 1, bty = "n")
+# Figure 2: Interaction between Accommodates and Shared Room
+plot(clean_airbnb_data$Price ~ clean_airbnb_data$Accommodates,
+     xlab = "Accommodates",
+     ylab = "Price",
+     main = "Figure 2. Interaction between Accommodates and Shared Room",
+     type = "n") 
+
+points(clean_airbnb_data$Price[clean_airbnb_data$Shared_Room == 1] ~
+       clean_airbnb_data$Accommodates[clean_airbnb_data$Shared_Room == 1],
+       col = "red",pch = 16)
+
+points(clean_airbnb_data$Price[clean_airbnb_data$Shared_Room == 0] ~
+       clean_airbnb_data$Accommodates[clean_airbnb_data$Shared_Room == 0],
+       col = "black",pch = 16)
+
+lines(lowess(clean_airbnb_data$Price[clean_airbnb_data$Shared_Room == 1] ~
+             clean_airbnb_data$Accommodates[clean_airbnb_data$Shared_Room == 1]),
+      col = "red",pch = 16)
+
+lines(lowess(clean_airbnb_data$Price[clean_airbnb_data$Shared_Room == 0] ~
+             clean_airbnb_data$Accommodates[clean_airbnb_data$Shared_Room == 0]),
+      col = "black",pch = 16)
+
+legend("topleft", legend = c("Shared Room", "Other Room Types"),
+       col = c("red", "black"), lty = 1, bty = "n")
+par(mfrow = c(1, 1))
+```
+Based on both *Figure 1* and *Figure 2*, the relationship between the number of guests a listing can accommodate and its price differs by room type. The slopes for private room and shared room are flatter and even slightly negative compared to other room types, indicating the effect of *accommodates* capacity on price depends on the room type. The interaction between *number_of_reviews* and *review_scores_rating* is supported by Teubner et al. (2017), captures how higher ratings become more credible when backed by many reviews, jointly influencing price.  
+
+**\underline{Ethics Discussion}**
+
+Our dataset is taken from publicly available Airbnb listings in Amsterdam, North Holland. I believe it is trustworthy because it follows the basic ideas of ethical data use such as accuracy, transparency, and fairness. The data were collected from open sources, not private platforms, and they contain only non-personal information. Each record describes property and host features instead of private details, which keeps people’s privacy safe and makes the dataset suitable for academic analysis.  
+During the data cleaning process, we removed missing values and converted all prices and review scores into clear numeric forms. This helped make the dataset more consistent and reduced possible errors. We also kept all values close to their original form, without making changes that could distort the meaning. These steps reflect honesty and integrity in research, which were emphasized in the ethics module.  
+Our use of this dataset is ethical because it is for learning and research, not for business or profit. We are exploring how host and property features influence Airbnb prices, to understand consumer behavior in the sharing economy. All results are shown at a general level, and no personal names or identifiers are included. This approach respects privacy, consent, and data ownership, ensuring that our study does not harm any individuals.  
+In conclusion, our dataset and methods meet the principles of responsible and ethical research. The data are open, anonymous, and handled carefully. By keeping transparency, fairness, and respect in our analysis, our project supports academic honesty and contributes to a better understanding of how data can be used responsibly in research.  
+
+**\underline{Preliminary results}**
+
+The preliminary model explores whether Airbnb hosts price their listings according to consumer preferences. *Accommodates* has the most significant effect, indicating that customers have a strong willingness to pay for capacity. The estimated coefficients further reveal that hosts think private room commands a higher premium than others because of its privacy. The negative interactions between *accommodates* and *room type* imply that prices for private and shared rooms increase less with each additional guest than entire homes, aligning with Wang and Jeong’s (2018) conclusion of the entire home with the highest listing price.   
+```{r, echo = FALSE,message = FALSE, warning = FALSE, results = 'hide'}
+# Linear Model
+# clean_airbnb_data is ready to model
+lm_model <- lm(Price ~ Accommodates + Private_Room + Shared_Room + `Accommodates:Private_Room` + `Accommodates:Shared_Room` + Number_of_Reviews + Review_Scores_Rating + `Number_of_Reviews:Review_Scores_Rating` + Host_Response_Rate + hr_within_hour + hr_within_few_hours + hr_few_days_or_more, data = clean_airbnb_data)
+
+summary(lm_model)
+
+# Coefficient table with SEs
+coef_tab <- coef(summary(lm_model))
+
+# 95% confidence intervals
+ci <- confint(lm_model)
+
+# Combine for a neat table
+coef_table <- cbind(
+  Estimate = coef(summary(lm_model))[, "Estimate"],
+  `Std. Error` = coef(summary(lm_model))[, "Std. Error"],
+  `t value` = coef(summary(lm_model))[, "t value"],
+  `p value` = coef(summary(lm_model))[, "Pr(>|t|)"],
+  `CI lower` = ci[, 1],
+  `CI upper` = ci[, 2]
+) %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Variable") %>%
+  mutate(
+    Variable = stringr::str_replace(
+      Variable,
+      "Number_of_Reviews:Review_Scores_Rating",
+      "#Reviews × Rating"
+    )
+  )
+
+
+```
+
+```{r, echo = FALSE,message = FALSE}
+
+knitr::kable(
+  coef_table,
+  caption = "Estimated Coefficients and 95\\% Confidence Intervals",
+  digits = 3
+) 
+
+```
+Although the intercept (entire home) and shared room coefficients have confidence intervals including zero, other predictors exhibit distinct and significant relationships with price, as shown in Table 3. Furthermore, the estimated coefficient of *number-of-reviews* is negative, possibly reflecting that hosts lower prices to attract more reviews. The coefficients for *review-scores-rating* and its interaction with *number-of-reviews* are small, suggesting that host attentiveness and review quality have a weaker influence on price than expected. This result contrasts with Teubner et al. (2017), who reported a stronger price premium associated with highly rated and responsive hosts. Regarding host-related variables, *host response rate* shows a positive but insignificant relationship with price, suggesting that higher response rates alone do not ensure a price premium. The *host-response-time* dummies show that listings responding within a few hours are priced slightly higher than the baseline “within a day,” while responses within an hour or after a few days show weaker or negative effects, indicating moderate promptness may be most appealing to guests.  
+```{r all_plots, fig.show="hold", out.width="90%", fig.height=5, fig.width=8, fig.align="center", echo=FALSE}
+
+e_hat <- resid(lm_model)
+y_hat <- fitted(lm_model)
+#Fitted vs Actual response (Price)
+par(mfrow=c(1,1), mar=c(4,4,2,1))
+plot(y_hat, model.frame(lm_model)$price, pch = 19, cex = 0.7,
+     main = "Fitted Values vs Actual Price",
+     xlab = "Fitted (Predicted) Price", ylab = "Actual Price")
+abline(a = 0, b = 1, col = "blue", lwd = 2, lty = 2)
+
+
+## ================= Figure: Pairs plot (scatterplot matrix) for predictors =================
+
+pairs(model.frame(lm_model)[, c("Accommodates", "Private_Room", "Shared_Room", "Number_of_Reviews", "Review_Scores_Rating", "Host_Response_Rate", "hr_within_hour", "hr_within_few_hours", "hr_few_days_or_more")],
+      main = "Pairs Plot of Predictors",
+      pch = 19, cex = 0.5, col = "grey40")
+```
+
+```{r all_plots2, fig.show="hold", out.width="70%", fig.height=10, fig.width=13, fig.align="center", echo=FALSE}
+
+par(mfrow=c(2,2), mar=c(4,4,2,1)
+)
+# 4 standard diagnostic plots (fill cells 1–4)
+plot(lm_model)  
+
+## ================= Figure: Scatterplots of Residuals vs Predictors =================
+plot(clean_airbnb_data$Accommodates, e_hat,
+     main = "Residuals vs Accommodates", xlab = "Accommodates", ylab = "Residuals",
+     pch = 19, cex = 0.7); abline(h = 0, lty = 2)
+
+plot(clean_airbnb_data$Number_of_Reviews, e_hat,
+     main = "Residuals vs Number of Reviews", xlab = "Number of Reviews", ylab = "Residuals",
+     pch = 19, cex = 0.7); abline(h = 0, lty = 2)
+
+plot(clean_airbnb_data$Review_Scores_Rating, e_hat,
+     main = "Residuals vs Review Scores Rating", xlab = "Review Scores Rating", ylab = "Residuals",
+     pch = 19, cex = 0.7); abline(h = 0, lty = 2)
+
+plot(clean_airbnb_data$Host_Response_Rate, e_hat,
+     main = "Residuals vs Host Response Rate", xlab = "Host Response Rate", ylab = "Residuals",
+     pch = 19, cex = 0.7); abline(h = 0, lty = 2)
+```
+The residual-versus-fitted and pair plots show approximately linear relationships, with no serious multicollinearity. Some predictors display mild heteroskedasticity, with the Scale–Location plot showing increasing variance for high-priced listings. The QQ plot suggests near-normal residuals with a right-tail deviation from luxury outliers. Overall, the assumptions remain reasonably satisfied, with minor variance and normality concerns that may slightly reduce prediction accuracy.  
+
+**\underline{Plan}**
+
+Our group aims to improve the current regression model by examining whether Airbnb hosts set listing prices according to consumers’ preferences. We will begin by reviewing all predictors to identify any that are redundant or irrelevant. If two predictors convey similar information, we will retain the more meaningful one or combine them. Next, we will conduct hypothesis tests to identify significant predictors and verify whether their coefficients align with those of previous studies. Core variables such as *accommodates* and *room-type* will remain in the model because they capture how customers value space and privacy when choosing an Airbnb listing.  
+Throughout the process, we will regularly check model assumptions by examining the linear relationships between the response and predictors and testing residuals for normality and constant variance. If residuals show heteroscedasticity or right-skewness, we will apply a log transformation to the dependent variable (price) to stabilize variance and improve model fit. We may also transform skewed predictors, such as *number_of_reviews*, to make relationships more linear and interpretable. Additional checks will ensure that no variable dominates the model and that multicollinearity stays within acceptable limits.  
+Model performance will be evaluated using adjusted R², *p-values*, and residual diagnostics. Predictors will be added or removed step by step, comparing changes in explanatory power and interpretability. We will balance simplicity and accuracy to avoid overfitting, guided by insights 
+from previous research to keep the model statistically valid and contextually meaningful. Starting from October 28, our group will refine the model and test assumptions. By November 2, we will finalize variable selection, then design the poster from November 10 and complete the slides by November 20. The presentation will be recorded by November 25, and the project reviewed before final submission on November 30. Lu Chen will write and edit, Karen will handle R coding and visualization, and Jiajia Lu will interpret results and link them to literature.  
+  
+\newpage
+\begin{center}
+\Huge \textbf{Flow Chart}
+\end{center}
+\newpage
+\newpage
+\begin{center}
+\textbf{Bibliography}
+\end{center}
+\begingroup
+\setlength{\parindent}{0pt} 
+\setlength{\parskip}{0pt}
+\renewcommand{\baselinestretch}{2}\normalsize
+\noindent\hangindent=0.5in
+Cannata, P. E. (2017). \textit{GAirBnB [Data set].} data.world. \url{https://data.world/cannata/gaairbnb}
+
+\noindent\hangindent=0.5in
+Chang, C., \& Li, S. (2021). Study of Price Determinants of Sharing Economy-Based Accommodation Services: Evidence from Airbnb.com. \textit{Journal of Theoretical and Applied Electronic Commerce Research, 16}(4), 584–601. \url{https://doi.org/10.3390/jtaer16040035}
+
+\noindent\hangindent=0.5in
+Inside Airbnb. (n.d.). \textit{Get the data [Data set download page].} Inside Airbnb. \url{https://insideairbnb.com/get-the-data/}
+
+\noindent\hangindent=0.5in
+Teubner, T., Hawlitschek, F., \& Dann, D. (2017). Price determinants on Airbnb: How reputation pays off in the sharing economy. \textit{Journal of Self-Governance and Management Economics, 5}(4), 53–80. \url{https://doi.org/10.22381/JSME5420173}
+
+\noindent\hangindent=0.5in
+University of Texas at Austin. (n.d.). \textit{Dr. Philip E. Cannata [Faculty profile].} UT Direct. Retrieved October 23, 2025, from \url{https://utdirect.utexas.edu/apps/student/coursedocs/nlogon/download/2427903}
+
+\noindent\hangindent=0.5in
+Wang, C. (R.), \& Jeong, M. (2018). What makes you choose Airbnb again? An examination of users’ perceptions toward the website and their stay. \textit{International Journal of Hospitality Management, 74}, 162–170. \url{https://doi.org/10.1016/j.ijhm.2018.04.006}
+
+\endgroup
